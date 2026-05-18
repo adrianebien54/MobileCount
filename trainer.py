@@ -1,4 +1,8 @@
+import os
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 import torch
 from torch import optim
@@ -23,56 +27,54 @@ class Trainer():
         self.pwd = pwd
 
         self.net_name = cfg.NET
-        self.net = CrowdCounter(cfg.GPU_ID,self.net_name).cuda()
-        self.optimizer = optim.Adam(self.net.parameters(), lr=cfg.LR, weight_decay=1e-4)
-        # self.optimizer = optim.SGD(self.net.parameters(), cfg.LR, momentum=0.95,weight_decay=5e-4)
-        self.scheduler = StepLR(self.optimizer, step_size=cfg.NUM_EPOCH_LR_DECAY, gamma=cfg.LR_DECAY)          
+        self.net = CrowdCounter(cfg.GPU_ID, self.net_name).cuda()
+        self.optimizer = optim.AdamW(self.net.parameters(), lr=cfg.LR, weight_decay=1e-4)
+        self.scheduler = StepLR(self.optimizer, step_size=cfg.NUM_EPOCH_LR_DECAY, gamma=cfg.LR_DECAY)
 
-        self.train_record = {'best_mae': 1e20, 'best_mse':1e20, 'best_model_name': ''}
-        self.timer = {'iter time' : Timer(),'train time' : Timer(),'val time' : Timer()} 
+        self.train_record = {'best_mae': 1e20, 'best_mse': 1e20, 'best_model_name': ''}
+        self.timer = {'iter time': Timer(), 'train time': Timer(), 'val time': Timer()}
         self.writer, self.log_txt = logger(self.exp_path, self.exp_name, self.pwd, 'exp')
-
 
         self.i_tb = 0
         self.epoch = -1
+
+        # Loss history for plotting
+        self.train_loss_history = []   # (epoch, avg_loss) per epoch
+        self.val_loss_history = []     # (epoch, val_loss) per validation
 
         if cfg.PRE_GCC:
             self.net.load_state_dict(torch.load(cfg.PRE_GCC_MODEL))
 
         self.train_loader, self.val_loader, self.restore_transform = dataloader()
 
-
     def forward(self):
-
-        # self.validate_V1()
         for epoch in range(cfg.MAX_EPOCH):
             self.epoch = epoch
+
+            self.timer['train time'].tic()
+            epoch_train_loss = self.train()
             if epoch > cfg.LR_DECAY_START:
                 self.scheduler.step()
-                
-            # training    
-            self.timer['train time'].tic()
-            self.train()
             self.timer['train time'].toc(average=False)
 
-            print 'train time: {:.2f}s'.format(self.timer['train time'].diff)
-            print '='*20
+            self.train_loss_history.append((epoch + 1, epoch_train_loss))
+            print('train time: {:.2f}s'.format(self.timer['train time'].diff))
+            print('=' * 20)
 
-            # validation
-            if epoch%cfg.VAL_FREQ==0 or epoch>cfg.VAL_DENSE_START:
+            if epoch % cfg.VAL_FREQ == 0 or epoch > cfg.VAL_DENSE_START:
                 self.timer['val time'].tic()
-                if self.data_mode in ['SHHA', 'SHHB', 'QNRF', 'UCF50']:
+                if self.data_mode in ['SHHA', 'SHHB', 'QNRF', 'UCF50', 'Tenebrio']:
                     self.validate_V1()
-                elif self.data_mode is 'WE':
+                elif self.data_mode == 'WE':
                     self.validate_V2()
-                elif self.data_mode is 'GCC':
+                elif self.data_mode == 'GCC':
                     self.validate_V3()
                 self.timer['val time'].toc(average=False)
-                print 'val time: {:.2f}s'.format(self.timer['val time'].diff)
+                print('val time: {:.2f}s'.format(self.timer['val time'].diff))
 
-
-    def train(self): # training for all datasets
+    def train(self):
         self.net.train()
+        losses = AverageMeter()
         for i, data in enumerate(self.train_loader, 0):
             self.timer['iter time'].tic()
             img, gt_map = data
@@ -85,24 +87,30 @@ class Trainer():
             loss.backward()
             self.optimizer.step()
 
+            losses.update(loss.item())
+
             if (i + 1) % cfg.PRINT_FREQ == 0:
                 self.i_tb += 1
                 self.writer.add_scalar('train_loss', loss.item(), self.i_tb)
                 self.timer['iter time'].toc(average=False)
-                print '[ep %d][it %d][loss %.4f][lr %.4f][%.2fs]' % \
-                        (self.epoch + 1, i + 1, loss.item(), self.optimizer.param_groups[0]['lr']*10000, self.timer['iter time'].diff)
-                print '        [cnt: gt: %.1f pred: %.2f]' % (gt_map[0].sum().data/self.cfg_data.LOG_PARA, pred_map[0].sum().data/self.cfg_data.LOG_PARA)            
+                print('[ep %d][it %d][loss %.4f][lr %.4f][%.2fs]' %
+                      (self.epoch + 1, i + 1, loss.item(),
+                       self.optimizer.param_groups[0]['lr'] * 10000,
+                       self.timer['iter time'].diff))
+                print('        [cnt: gt: %.1f pred: %.2f]' % (
+                    gt_map[0].sum().data / self.cfg_data.LOG_PARA,
+                    pred_map[0].sum().data / self.cfg_data.LOG_PARA))
 
+        return losses.avg
 
-    def validate_V1(self):# validate_V1 for SHHA, SHHB, UCF-QNRF, UCF50
-
+    def validate_V1(self):
         self.net.eval()
-        
+
         losses = AverageMeter()
         maes = AverageMeter()
         mses = AverageMeter()
 
-        time_sampe = 0
+        time_sample = 0
         step = 0
 
         for vi, data in enumerate(self.val_loader, 0):
@@ -114,24 +122,25 @@ class Trainer():
 
                 pred_map = self.net.forward(img, gt_map)
 
-                step = step + 1
+                step += 1
                 time_start1 = time.time()
                 test_map = self.net.test_forward(img)
                 time_end1 = time.time()
-                time_sampe = time_sampe + (time_end1 - time_start1)
+                time_sample += time_end1 - time_start1
 
                 pred_map = pred_map.data.cpu().numpy()
                 gt_map = gt_map.data.cpu().numpy()
-                
-                pred_cnt = np.sum(pred_map)/self.cfg_data.LOG_PARA
-                gt_count = np.sum(gt_map)/self.cfg_data.LOG_PARA
+
+                pred_cnt = np.sum(pred_map) / self.cfg_data.LOG_PARA
+                gt_count = np.sum(gt_map) / self.cfg_data.LOG_PARA
 
                 losses.update(self.net.loss.item())
-                maes.update(abs(gt_count-pred_cnt))
-                mses.update((gt_count-pred_cnt)*(gt_count-pred_cnt))
-                if vi==0:
-                    vis_results(self.exp_name, self.epoch, self.writer, self.restore_transform, img, pred_map, gt_map)
-            
+                maes.update(abs(gt_count - pred_cnt))
+                mses.update((gt_count - pred_cnt) ** 2)
+                if vi == 0:
+                    vis_results(self.exp_name, self.epoch, self.writer,
+                                self.restore_transform, img, pred_map, gt_map)
+
         mae = maes.avg
         mse = np.sqrt(mses.avg)
         loss = losses.avg
@@ -140,12 +149,15 @@ class Trainer():
         self.writer.add_scalar('mae', mae, self.epoch + 1)
         self.writer.add_scalar('mse', mse, self.epoch + 1)
 
-        self.train_record = update_model(self.net,self.epoch,self.exp_path,self.exp_name,[mae, mse, loss],self.train_record,self.log_txt)
-        print_summary(self.exp_name,[mae, mse, loss],self.train_record)
-        print '\nForward Time: %fms' % (time_sampe * 1000 / step)
+        self.val_loss_history.append((self.epoch + 1, loss))
+        self._save_loss_plot()
 
-    def validate_V2(self):  # validate_V2 for WE
+        self.train_record = update_model(self.net, self.epoch, self.exp_path, self.exp_name,
+                                         [mae, mse, loss], self.train_record, self.log_txt)
+        print_summary(self.exp_name, [mae, mse, loss], self.train_record)
+        print('\nForward Time: %fms' % (time_sample * 1000 / step))
 
+    def validate_V2(self):
         self.net.eval()
 
         losses = AverageCategoryMeter(5)
@@ -155,91 +167,69 @@ class Trainer():
         from datasets.WE.setting import cfg_data
         from scipy import io as sio
         for val_folder in cfg_data.VAL_FOLDER:
-            roi_mask.append(sio.loadmat(os.path.join(cfg_data.DATA_PATH, 'test', val_folder + '_roi.mat'))['BW'])
+            roi_mask.append(sio.loadmat(os.path.join(cfg_data.DATA_PATH, 'test',
+                                                       val_folder + '_roi.mat'))['BW'])
 
         for i_sub, i_loader in enumerate(self.val_loader, 0):
-
             mask = roi_mask[i_sub]
             for vi, data in enumerate(i_loader, 0):
                 img, gt_map = data
-
                 with torch.no_grad():
                     img = Variable(img).cuda()
                     gt_map = Variable(gt_map).cuda()
-
                     pred_map = self.net.forward(img, gt_map)
-
                     pred_map = pred_map.data.cpu().numpy()
                     gt_map = gt_map.data.cpu().numpy()
-
                     for i_img in range(pred_map.shape[0]):
                         pred_cnt = np.sum(pred_map[i_img]) / self.cfg_data.LOG_PARA
                         gt_count = np.sum(gt_map[i_img]) / self.cfg_data.LOG_PARA
-
                         losses.update(self.net.loss.item(), i_sub)
                         maes.update(abs(gt_count - pred_cnt), i_sub)
                     if vi == 0:
-                        vis_results(self.exp_name, self.epoch, self.writer, self.restore_transform, img, pred_map,
-                                    gt_map)
+                        vis_results(self.exp_name, self.epoch, self.writer,
+                                    self.restore_transform, img, pred_map, gt_map)
 
         mae = np.average(maes.avg)
         loss = np.average(losses.avg)
 
         self.writer.add_scalar('val_loss', loss, self.epoch + 1)
         self.writer.add_scalar('mae', mae, self.epoch + 1)
-        self.writer.add_scalar('mae_s1', maes.avg[0], self.epoch + 1)
-        self.writer.add_scalar('mae_s2', maes.avg[1], self.epoch + 1)
-        self.writer.add_scalar('mae_s3', maes.avg[2], self.epoch + 1)
-        self.writer.add_scalar('mae_s4', maes.avg[3], self.epoch + 1)
-        self.writer.add_scalar('mae_s5', maes.avg[4], self.epoch + 1)
 
-        self.train_record = update_model(self.net, self.epoch, self.exp_path, self.exp_name, [mae, 0, loss],
-                                         self.train_record, self.log_txt)
+        self.val_loss_history.append((self.epoch + 1, loss))
+        self._save_loss_plot()
+
+        self.train_record = update_model(self.net, self.epoch, self.exp_path, self.exp_name,
+                                         [mae, 0, loss], self.train_record, self.log_txt)
         print_WE_summary(self.log_txt, self.epoch, [mae, 0, loss], self.train_record, maes)
 
-    def validate_V3(self):  # validate_V3 for GCC
-
+    def validate_V3(self):
         self.net.eval()
 
         losses = AverageMeter()
         maes = AverageMeter()
         mses = AverageMeter()
 
-        c_maes = {'level': AverageCategoryMeter(9), 'time': AverageCategoryMeter(8), 'weather': AverageCategoryMeter(7)}
-        c_mses = {'level': AverageCategoryMeter(9), 'time': AverageCategoryMeter(8), 'weather': AverageCategoryMeter(7)}
+        c_maes = {'level': AverageCategoryMeter(9), 'time': AverageCategoryMeter(8),
+                  'weather': AverageCategoryMeter(7)}
+        c_mses = {'level': AverageCategoryMeter(9), 'time': AverageCategoryMeter(8),
+                  'weather': AverageCategoryMeter(7)}
 
         for vi, data in enumerate(self.val_loader, 0):
             img, gt_map, attributes_pt = data
-
             with torch.no_grad():
                 img = Variable(img).cuda()
                 gt_map = Variable(gt_map).cuda()
-
                 pred_map = self.net.forward(img, gt_map)
-
                 pred_map = pred_map.data.cpu().numpy()
                 gt_map = gt_map.data.cpu().numpy()
-
                 for i_img in range(pred_map.shape[0]):
                     pred_cnt = np.sum(pred_map[i_img]) / self.cfg_data.LOG_PARA
                     gt_count = np.sum(gt_map[i_img]) / self.cfg_data.LOG_PARA
-
                     s_mae = abs(gt_count - pred_cnt)
-                    s_mse = (gt_count - pred_cnt) * (gt_count - pred_cnt)
-
+                    s_mse = (gt_count - pred_cnt) ** 2
                     losses.update(self.net.loss.item())
                     maes.update(s_mae)
                     mses.update(s_mse)
-                    # attributes_pt = attributes_pt.squeeze()
-                    # c_maes['level'].update(s_mae, attributes_pt[i_img][0])
-                    # c_mses['level'].update(s_mse, attributes_pt[i_img][0])
-                    # c_maes['time'].update(s_mae, attributes_pt[i_img][1] / 3)
-                    # c_mses['time'].update(s_mse, attributes_pt[i_img][1] / 3)
-                    # c_maes['weather'].update(s_mae, attributes_pt[i_img][2])
-                    # c_mses['weather'].update(s_mse, attributes_pt[i_img][2])
-
-                # if vi == 0:
-                #     vis_results(self.exp_name, self.epoch, self.writer, self.restore_transform, img, pred_map, gt_map)
 
         loss = losses.avg
         mae = maes.avg
@@ -249,7 +239,31 @@ class Trainer():
         self.writer.add_scalar('mae', mae, self.epoch + 1)
         self.writer.add_scalar('mse', mse, self.epoch + 1)
 
-        self.train_record = update_model(self.net, self.epoch, self.exp_path, self.exp_name, [mae, mse, loss],
-                                         self.train_record, self.log_txt)
+        self.val_loss_history.append((self.epoch + 1, loss))
+        self._save_loss_plot()
 
-        print_GCC_summary(self.log_txt, self.epoch, [mae, mse, loss], self.train_record, c_maes, c_mses)
+        self.train_record = update_model(self.net, self.epoch, self.exp_path, self.exp_name,
+                                         [mae, mse, loss], self.train_record, self.log_txt)
+        print_GCC_summary(self.log_txt, self.epoch, [mae, mse, loss],
+                          self.train_record, c_maes, c_mses)
+
+    def _save_loss_plot(self):
+        if not self.train_loss_history or not self.val_loss_history:
+            return
+
+        train_epochs, train_losses = zip(*self.train_loss_history)
+        val_epochs, val_losses = zip(*self.val_loss_history)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(train_epochs, train_losses, label='Train Loss', color='steelblue', linewidth=1.5)
+        ax.plot(val_epochs, val_losses, label='Val Loss', color='darkorange',
+                linewidth=1.5, marker='o', markersize=3)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss (MSE)')
+        ax.set_title('MobileCount — Tenebrio Training Loss')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plot_path = os.path.join(self.exp_path, self.exp_name, 'loss_curve.png')
+        fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
