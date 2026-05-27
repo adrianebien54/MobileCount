@@ -45,6 +45,10 @@ class Trainer():
         if cfg.PRE_GCC:
             self.net.load_state_dict(torch.load(cfg.PRE_GCC_MODEL))
 
+        if cfg.RESUME:
+            print(f'Resuming from {cfg.RESUME_PATH}')
+            self.net.load_state_dict(torch.load(cfg.RESUME_PATH, weights_only=False))
+
         self.train_loader, self.val_loader, self.restore_transform = dataloader()
 
     def forward(self):

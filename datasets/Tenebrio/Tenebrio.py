@@ -41,13 +41,24 @@ class Tenebrio(data.Dataset):
             sep=',', header=None,
         ).values.astype(np.float32)
 
+        den = Image.fromarray(den)
+
+        # If the density map doesn't match the image size (e.g. stored at 1/8 scale),
+        # resize it to match, then re-normalise so the pixel sum (total count) is
+        # preserved. Bicubic upsampling multiplies the sum by (dst_area / src_area);
+        # dividing afterwards restores the original total count.
+        if den.size != (img_w, img_h):
+            src_w, src_h = den.size
+            den = den.resize((img_w, img_h), Image.BICUBIC)
+            area_ratio = (img_w * img_h) / (src_w * src_h)
+            den_arr = np.array(den, dtype=np.float32) / area_ratio
+            den = Image.fromarray(den_arr)
+
         pad_w = (8 - img_w % 8) % 8
         pad_h = (8 - img_h % 8) % 8
         if pad_w or pad_h:
             img = ImageOps.expand(img, border=(0, 0, pad_w, pad_h), fill=0)
-            den = ImageOps.expand(Image.fromarray(den), border=(0, 0, pad_w, pad_h), fill=0)
-        else:
-            den = Image.fromarray(den)
+            den = ImageOps.expand(den, border=(0, 0, pad_w, pad_h), fill=0)
 
         return img, den
 

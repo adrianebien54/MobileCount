@@ -206,12 +206,15 @@ def copy_cur_env(work_dir, dst_dir, exception):
     if not os.path.exists(dst_dir):
         os.mkdir(dst_dir)
 
+    # Exclude large data/env/output dirs that should not be snapshot-copied
+    excluded_dirs = {'datasets', 'exp', '.venv', '__pycache__', 'node_modules', '.git'}
+
     for filename in os.listdir(work_dir):
 
         file = os.path.join(work_dir,filename)
         dst_file = os.path.join(dst_dir,filename)
 
-        if os.path.isdir(file) and exception not in filename:
+        if os.path.isdir(file) and exception not in filename and filename not in excluded_dirs:
             shutil.copytree(file, dst_file)
         elif os.path.isfile(file):
             shutil.copyfile(file,dst_file)
