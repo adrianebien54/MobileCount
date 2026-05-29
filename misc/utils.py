@@ -58,21 +58,21 @@ def weights_normal_init(*models):
                     m.weight.data.normal_(0.0, dev)
 
 
-def logger(exp_path, exp_name, work_dir, exception):
-    
+def logger(exp_path, exp_name, work_dir, exception, resume=False):
+
     if not os.path.exists(exp_path):
         os.mkdir(exp_path)
     writer = SummaryWriter(exp_path+ '/' + exp_name)
     log_file = exp_path + '/' + exp_name + '/' + exp_name + '.txt'
-    
-    cfg_file = open('./config.py',"r")  
+
+    cfg_file = open('./config.py',"r")
     cfg_lines = cfg_file.readlines()
-    
+
     with open(log_file, 'a') as f:
             f.write(''.join(cfg_lines) + '\n\n\n\n')
 
-
-    copy_cur_env(work_dir, exp_path+ '/' + exp_name + '/code', exception)
+    if not resume:
+        copy_cur_env(work_dir, exp_path+ '/' + exp_name + '/code', exception)
 
 
     return writer, log_file
@@ -181,22 +181,35 @@ def print_GCC_summary(log_txt,epoch, scores,train_record,c_maes,c_mses):
     print('=' * 50)
 
 
-def update_model(net,epoch,exp_path,exp_name,scores,train_record,log_file):
+def update_model(net, optimizer, scheduler, epoch, i_tb,
+                 exp_path, exp_name, scores, train_record, log_file):
 
     mae, mse, loss = scores
 
     snapshot_name = 'all_ep_%d_mae_%.1f_mse_%.1f' % (epoch + 1, mae, mse)
 
-    if mae < train_record['best_mae'] or mse < train_record['best_mse']:   
+    if mae < train_record['best_mae'] or mse < train_record['best_mse']:
         train_record['best_model_name'] = snapshot_name
-        logger_txt(log_file,epoch,scores)
-        to_saved_weight = net.state_dict()
-        torch.save(to_saved_weight, os.path.join(exp_path, exp_name, snapshot_name + '.pth'))
+        logger_txt(log_file, epoch, scores)
+        torch.save(net.state_dict(),
+                   os.path.join(exp_path, exp_name, snapshot_name + '.pth'))
 
-    if mae < train_record['best_mae']:           
+    if mae < train_record['best_mae']:
         train_record['best_mae'] = mae
     if mse < train_record['best_mse']:
-        train_record['best_mse'] = mse 
+        train_record['best_mse'] = mse
+
+    latest_state = {
+        'train_record': train_record,
+        'net': net.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
+        'epoch': epoch,
+        'i_tb': i_tb,
+        'exp_path': exp_path,
+        'exp_name': exp_name,
+    }
+    torch.save(latest_state, os.path.join(exp_path, exp_name, 'latest_state.pth'))
 
     return train_record
 

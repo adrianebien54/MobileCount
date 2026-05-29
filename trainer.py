@@ -33,10 +33,9 @@ class Trainer():
 
         self.train_record = {'best_mae': 1e20, 'best_mse': 1e20, 'best_model_name': ''}
         self.timer = {'iter time': Timer(), 'train time': Timer(), 'val time': Timer()}
-        self.writer, self.log_txt = logger(self.exp_path, self.exp_name, self.pwd, 'exp')
 
         self.i_tb = 0
-        self.epoch = -1
+        self.epoch = 0
 
         # Loss history for plotting
         self.train_loss_history = []   # (epoch, avg_loss) per epoch
@@ -45,14 +44,25 @@ class Trainer():
         if cfg.PRE_GCC:
             self.net.load_state_dict(torch.load(cfg.PRE_GCC_MODEL))
 
-        if cfg.RESUME:
-            print(f'Resuming from {cfg.RESUME_PATH}')
-            self.net.load_state_dict(torch.load(cfg.RESUME_PATH, weights_only=False))
-
         self.train_loader, self.val_loader, self.restore_transform = dataloader()
 
+        if cfg.RESUME:
+            print(f'Resuming from {cfg.RESUME_PATH}')
+            latest_state = torch.load(cfg.RESUME_PATH, weights_only=False)
+            self.net.load_state_dict(latest_state['net'])
+            self.optimizer.load_state_dict(latest_state['optimizer'])
+            self.scheduler.load_state_dict(latest_state['scheduler'])
+            self.epoch        = latest_state['epoch'] + 1
+            self.i_tb         = latest_state['i_tb']
+            self.train_record = latest_state['train_record']
+            self.exp_path     = latest_state['exp_path']
+            self.exp_name     = latest_state['exp_name']
+
+        self.writer, self.log_txt = logger(self.exp_path, self.exp_name, self.pwd, 'exp',
+                                           resume=cfg.RESUME)
+
     def forward(self):
-        for epoch in range(cfg.MAX_EPOCH):
+        for epoch in range(self.epoch, cfg.MAX_EPOCH):
             self.epoch = epoch
 
             self.timer['train time'].tic()
@@ -156,7 +166,8 @@ class Trainer():
         self.val_loss_history.append((self.epoch + 1, loss))
         self._save_loss_plot()
 
-        self.train_record = update_model(self.net, self.epoch, self.exp_path, self.exp_name,
+        self.train_record = update_model(self.net, self.optimizer, self.scheduler, self.epoch,
+                                         self.i_tb, self.exp_path, self.exp_name,
                                          [mae, mse, loss], self.train_record, self.log_txt)
         print_summary(self.exp_name, [mae, mse, loss], self.train_record)
         print('\nForward Time: %fms' % (time_sample * 1000 / step))
@@ -246,7 +257,8 @@ class Trainer():
         self.val_loss_history.append((self.epoch + 1, loss))
         self._save_loss_plot()
 
-        self.train_record = update_model(self.net, self.epoch, self.exp_path, self.exp_name,
+        self.train_record = update_model(self.net, self.optimizer, self.scheduler, self.epoch,
+                                         self.i_tb, self.exp_path, self.exp_name,
                                          [mae, mse, loss], self.train_record, self.log_txt)
         print_GCC_summary(self.log_txt, self.epoch, [mae, mse, loss],
                           self.train_record, c_maes, c_mses)
