@@ -1,2 +1,8 @@
 datasets/Tenebrio/images/
 exp/
+# Allow small per-run artifacts + checkpoints for the 386x260 bbox/2 runs
+!exp/*/mae_history.json
+!exp/*/training_curves.png
+!exp/*/loss_curve.png
+!exp/05-29_*/latest_state.pth
+!exp/05-29_*/all_ep_*.pth
